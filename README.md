@@ -1,224 +1,175 @@
 # DLQ Monitor
 
-An automated Dead Letter Queue monitoring service that classifies failures, retries transient errors with exponential backoff, and alerts on queue depth anomalies. Built for teams running async workloads on AWS SQS who are tired of manually triaging DLQ messages at 2 AM.
+Automated dead letter queue triage: classifies SQS failures, retries transient errors with exponential backoff, and alerts on anomalies.
 
-## Why This Exists
-
-Every production SQS consumer eventually drops messages into a DLQ. The default response is a CloudWatch alarm that says "you have 47 messages" — with zero context on whether they're retryable timeouts or permanently broken payloads. Engineers waste time manually inspecting messages, guessing at root causes, and copy-pasting `aws sqs` commands.
-
-DLQ Monitor replaces that workflow. It continuously polls the DLQ, classifies each message into a failure category (timeout, validation error, dependency failure, poison pill), automatically retries transient failures back to the source queue, and fires SNS alerts when things go sideways. Permanent failures are surfaced and removed — not silently retried in a loop.
+**[Live Demo](https://be7vs42u6g.execute-api.us-east-1.amazonaws.com/docs)**
 
 ## Architecture
 
 ```
-                          ┌──────────────────────────────────────────────────┐
-                          │              DLQ Monitor Service                 │
-                          │                                                  │
-┌──────────┐  poll every  │  ┌───────────┐    ┌────────────────┐             │
-│          │  N seconds   │  │           │    │    Failure      │             │
-│ SQS DLQ  │─────────────►│  │  Poller   │───►│   Classifier   │             │
-│          │              │  │           │    │                │             │
-└──────────┘              │  └───────────┘    └───────┬────────┘             │
-                          │                           │                      │
-                          │              ┌────────────┼────────────┐         │
-                          │              │            │            │         │
-                          │         transient     permanent    poison        │
-                          │              │            │         pill         │
-                          │              ▼            ▼            │         │
-                          │  ┌───────────────┐  ┌──────────┐      │         │
-                          │  │ Retry Engine   │  │  Dead    │      │         │
-                          │  │ (exp backoff)  │  │ Lettered │      │         │
-                          │  └───────┬───────┘  └──────────┘      │         │
-                          │          │                             │         │
-                          └──────────┼─────────────────────────────┼─────────┘
-                                     │                             │
-                                     ▼                             ▼
-                          ┌──────────────┐              ┌──────────────────┐
-                          │ Source Queue  │              │   SNS Alerts     │
-                          │  (re-enqueue)│              │ (depth/poison)   │
-                          └──────────────┘              └──────────────────┘
+┌──────────────┐         ┌──────────────────────────────────────────────────────────────┐
+│ EventBridge  │         │                    DLQ Monitor                               │
+│  (1 min)     │────────▶│  ┌─────────────┐    ┌──────────────┐    ┌────────────────┐   │
+└──────────────┘         │  │   Poller     │───▶│  Classifier  │───▶│  Retry Engine  │   │
+                         │  │   Lambda     │    │              │    │  (exp backoff) │   │
+┌──────────────┐         │  └──────┬───────┘    └──────┬───────┘    └───┬────────┬───┘   │
+│  API Gateway │────────▶│         │                   │                │        │       │
+│  (HTTP API)  │         │  ┌──────▼───────┐           │         ┌──────▼──┐  ┌──▼────┐  │
+└──────────────┘         │  │   FastAPI    │           │         │ Source  │  │ DynamoDB│ │
+        ▲                │  │   Handlers   │           │         │ Queue   │  │Tracking│  │
+        │                │  └──────────────┘           │         └─────────┘  └────────┘  │
+   end users             │                      ┌──────▼───────┐                          │
+                         │                      │  SNS Alerts  │                          │
+                         │                      │  (depth /    │                          │
+                         │                      │  poison pill)│                          │
+                         │                      └──────────────┘                          │
+                         └──────────────────────────────────────────────────────────────┘
+
+         ┌──────────────────────────────────────────────────────────────┐
+         │  CloudWatch Dashboard                                       │
+         │  messages_retried  ·  messages_dead  ·  alerts_sent         │
+         └──────────────────────────────────────────────────────────────┘
+
+         ┌──────────┐     redrive policy      ┌──────────────┐
+         │ SQS DLQ  │◀───── (maxReceiveCount=3) ──────│ Source Queue  │
+         └──────────┘                          └──────────────┘
 ```
-
-## Tech Stack
-
-| Layer          | Technology                          |
-|----------------|-------------------------------------|
-| Runtime        | Python 3.12                         |
-| Framework      | FastAPI + Uvicorn                   |
-| AWS SDK        | Boto3 (SQS, SNS)                   |
-| Retry Logic    | Tenacity (exponential backoff)      |
-| Data Models    | Pydantic v2                         |
-| Configuration  | pydantic-settings + `.env`          |
-| Logging        | structlog (structured JSON)         |
-| Local AWS      | LocalStack 3.4                      |
-| Containerization | Docker + Docker Compose           |
 
 ## Failure Classification
 
-The classifier inspects message bodies, error fields, and SQS attributes to categorize failures:
+| Category | Retryable | Trigger |
+|---|---|---|
+| `TIMEOUT` | Yes | `timeout`, `timed out`, `timed_out` in body |
+| `DEPENDENCY_FAILURE` | Yes | `connection refused`, `unavailable`, `503` in body |
+| `UNKNOWN` | Yes | No pattern matched |
+| `VALIDATION_ERROR` | No | `invalid`, `malformed`, `400`, `401`, `422`, etc. |
+| `POISON_PILL` | No | `ApproximateReceiveCount` > 5 |
 
-| Category             | Retryable | Trigger Conditions                                          |
-|----------------------|-----------|-------------------------------------------------------------|
-| `TIMEOUT`            | Yes       | Body contains `timeout`, `timed out`, `timed_out`           |
-| `DEPENDENCY_FAILURE` | Yes       | Body contains `connection refused`, `unavailable`, `503`    |
-| `UNKNOWN`            | Yes       | No pattern matched — retried as a precaution                |
-| `VALIDATION_ERROR`   | No        | Body contains `invalid`, `malformed`, `400`, `401`, `422`, etc. |
-| `POISON_PILL`        | No        | `ApproximateReceiveCount` exceeds 5                         |
+Transient failures retry with exponential backoff. Permanent failures get deleted and tracked in DynamoDB.
 
-Transient failures are retried with exponential backoff. Permanent failures are logged, alerted on, and removed from the queue.
+## Tech Stack
 
-## Getting Started
+| Component | Technology |
+|---|---|
+| API | FastAPI + Mangum (Lambda adapter) |
+| Compute | AWS Lambda (Python 3.12) |
+| Gateway | API Gateway HTTP API |
+| Queue | SQS (source + DLQ with redrive) |
+| Storage | DynamoDB (retry tracking) |
+| Alerts | SNS |
+| Scheduler | EventBridge (1-minute poller) |
+| Observability | CloudWatch dashboard + custom metrics |
+| Retry logic | Tenacity (exponential backoff) |
+| IaC | AWS CDK (Python) |
+| Local dev | LocalStack + Docker Compose |
 
-### Prerequisites
-
-- Docker and Docker Compose
-- (Optional) `curl` or `httpx` for testing the API
-
-### Run Locally
+## Local Development
 
 ```bash
-# Clone the repository
-git clone https://github.com/<your-org>/dlq-monitor.git
-cd dlq-monitor
-
-# Copy environment config
 cp .env.example .env
-
-# Start everything (LocalStack + DLQ Monitor)
 docker compose up --build
 ```
 
-LocalStack automatically provisions the SQS queues, DLQ, SNS topic, and redrive policy on startup. The API is available at `http://localhost:8000` once both containers are healthy.
+LocalStack provisions the SQS queues, DLQ, SNS topic, and redrive policy automatically. API is at `http://localhost:8000`.
 
-### Seed Test Messages
-
-Push sample messages into the DLQ to see classification in action:
+Seed test messages:
 
 ```bash
-# Transient failure (will be retried)
+# Transient failure — will be retried
 aws --endpoint-url=http://localhost:4566 sqs send-message \
   --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/my-service-dlq \
   --message-body '{"error": "connection refused", "service": "payments-api"}'
 
-# Permanent failure (will be dead-lettered)
+# Permanent failure — will be dead-lettered
 aws --endpoint-url=http://localhost:4566 sqs send-message \
   --queue-url http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/my-service-dlq \
   --message-body '{"error": "invalid schema: missing required field user_id"}'
 ```
 
-## API Reference
+## API
 
-| Method   | Endpoint                | Description                              |
-|----------|-------------------------|------------------------------------------|
-| `GET`    | `/health`               | Liveness check                           |
-| `GET`    | `/stats`                | Queue depth, processed/retried/dead counts, alert count |
-| `GET`    | `/messages`             | Poll DLQ and return classified messages  |
-| `GET`    | `/messages?retry=true`  | Poll, classify, and auto-retry transient failures |
-| `POST`   | `/poll`                 | Trigger a one-off poll cycle             |
-| `POST`   | `/retry/{message_id}`   | Retry a specific message                 |
-| `DELETE` | `/messages/{message_id}`| Delete a message from the DLQ            |
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/health` | Liveness check |
+| `GET` | `/stats` | Queue depth + processed/retried/dead counts |
+| `GET` | `/messages` | Poll DLQ, classify, return messages |
+| `GET` | `/messages?retry=true` | Poll, classify, auto-retry transient failures |
+| `POST` | `/poll` | Trigger a one-off poll cycle |
+| `POST` | `/retry/{message_id}` | Retry a specific message |
+| `DELETE` | `/messages/{message_id}` | Delete a message from the DLQ |
 
-## Example Usage
-
-### Check service health
+### Examples
 
 ```bash
-curl http://localhost:8000/health
-```
-```json
-{"status": "ok"}
-```
+# Health check
+curl https://be7vs42u6g.execute-api.us-east-1.amazonaws.com/health
+# {"status":"ok"}
 
-### View queue stats
+# Queue stats
+curl https://be7vs42u6g.execute-api.us-east-1.amazonaws.com/stats
+# {
+#   "queue_url": "https://sqs.us-east-1.amazonaws.com/123456789/my-service-dlq",
+#   "depth": 12,
+#   "messages_processed": 47,
+#   "messages_retried": 31,
+#   "messages_dead": 8,
+#   "alerts_sent": 3,
+#   "last_polled": "2026-06-16T04:32:10.123456"
+# }
 
-```bash
-curl http://localhost:8000/stats
-```
-```json
-{
-  "queue_url": "http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/my-service-dlq",
-  "depth": 12,
-  "messages_processed": 47,
-  "messages_retried": 31,
-  "messages_dead": 8,
-  "alerts_sent": 3,
-  "last_polled": "2026-06-16T04:32:10.123456"
-}
-```
+# Poll and classify (no retry)
+curl https://be7vs42u6g.execute-api.us-east-1.amazonaws.com/messages
 
-### Poll and classify messages (no retry)
+# Poll, classify, and auto-retry transient failures
+curl "https://be7vs42u6g.execute-api.us-east-1.amazonaws.com/messages?retry=true"
 
-```bash
-curl http://localhost:8000/messages
-```
-```json
-[
-  {
-    "message_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-    "body": "{\"error\": \"connection refused\", \"service\": \"payments-api\"}",
-    "failure_category": "DEPENDENCY_FAILURE",
-    "retry_count": 0
-  }
-]
-```
-
-### Poll, classify, and auto-retry transient failures
-
-```bash
-curl "http://localhost:8000/messages?retry=true"
-```
-
-Transient messages (`TIMEOUT`, `DEPENDENCY_FAILURE`, `UNKNOWN`) are re-enqueued to the source queue with exponential backoff. Permanent failures (`VALIDATION_ERROR`, `POISON_PILL`) are left untouched.
-
-### Retry a specific message
-
-```bash
-curl -X POST http://localhost:8000/retry/a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
+# Retry a specific message
+curl -X POST https://be7vs42u6g.execute-api.us-east-1.amazonaws.com/retry/MSG_ID \
   -H "Content-Type: application/json" \
-  -d '{
-    "receipt_handle": "AQEBwJnKyrHigUMZj6rYigCgxlaS3...",
-    "body": "{\"error\": \"connection refused\"}",
-    "attributes": {}
-  }'
-```
-```json
-{
-  "message_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "success": true,
-  "attempt": 1,
-  "error": null
-}
-```
+  -d '{"receipt_handle": "AQEBwJnKyrHigUMZj6rYigCgxlaS3...", "body": "{\"error\": \"connection refused\"}", "attributes": {}}'
 
-### Delete a message (manual triage)
-
-```bash
-curl -X DELETE http://localhost:8000/messages/a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
+# Delete a message
+curl -X DELETE https://be7vs42u6g.execute-api.us-east-1.amazonaws.com/messages/MSG_ID \
   -H "Content-Type: application/json" \
   -d '{"receipt_handle": "AQEBwJnKyrHigUMZj6rYigCgxlaS3..."}'
 ```
-```json
-{"status": "deleted", "message_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"}
+
+## Deploy to AWS
+
+Requires: AWS CDK CLI, Docker, Python 3.12+, configured AWS credentials.
+
+```bash
+cd infra
+pip install -r requirements.txt
+cdk bootstrap   # first time only
+cdk deploy
 ```
+
+CDK outputs the API Gateway URL on completion. The stack creates:
+
+- SQS source queue + DLQ with redrive policy (maxReceiveCount=3)
+- DynamoDB table for retry tracking (pay-per-request)
+- SNS topic for alerts
+- Two Lambda functions (API handler + poller) with least-privilege IAM
+- API Gateway HTTP API with CORS
+- EventBridge rule triggering the poller every 1 minute
+- CloudWatch dashboard with `messages_retried`, `messages_dead`, `alerts_sent`
 
 ## Configuration
 
-All configuration is via environment variables (see `.env.example`):
+All configuration via environment variables (see `.env.example`):
 
-| Variable                | Default     | Description                                      |
-|-------------------------|-------------|--------------------------------------------------|
-| `AWS_REGION`            | `us-east-1` | AWS region                                      |
-| `AWS_ENDPOINT_URL`      | —           | LocalStack endpoint (omit for real AWS)          |
-| `DLQ_URL`               | —           | SQS DLQ URL to monitor                          |
-| `SOURCE_QUEUE_URL`      | —           | Source queue URL for retries                     |
-| `SNS_TOPIC_ARN`         | —           | SNS topic for alerts                             |
-| `POLL_INTERVAL_SECONDS` | `30`        | Seconds between poll cycles                      |
-| `MAX_RETRY_ATTEMPTS`    | `3`         | Max retries per message (exponential backoff)    |
-| `ALERT_THRESHOLD`       | `5`         | Queue depth that triggers an SNS alert           |
-
-## Live Demo
-
-> [**Live Demo**](#) — *coming soon*
+| Variable | Default | Description |
+|---|---|---|
+| `AWS_REGION` | `us-east-1` | AWS region |
+| `AWS_ENDPOINT_URL` | — | LocalStack endpoint (omit for real AWS) |
+| `DLQ_URL` | — | SQS DLQ URL to monitor |
+| `SOURCE_QUEUE_URL` | — | Source queue URL for retries |
+| `SNS_TOPIC_ARN` | — | SNS topic ARN for alerts |
+| `DYNAMODB_TABLE_NAME` | `dlq-retry-tracking` | DynamoDB table for retry state |
+| `POLL_INTERVAL_SECONDS` | `30` | Seconds between poll cycles (local dev) |
+| `MAX_RETRY_ATTEMPTS` | `3` | Max retries per message |
+| `ALERT_THRESHOLD` | `5` | Queue depth that triggers an alert |
 
 ## License
 
