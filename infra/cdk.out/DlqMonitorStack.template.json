@@ -1,0 +1,1128 @@
+{
+ "Description": "DLQ Monitor - automated dead letter queue triage and retry",
+ "Resources": {
+  "DLQ581697C4": {
+   "Type": "AWS::SQS::Queue",
+   "Properties": {
+    "MessageRetentionPeriod": 1209600,
+    "QueueName": "my-service-dlq",
+    "VisibilityTimeout": 30
+   },
+   "UpdateReplacePolicy": "Delete",
+   "DeletionPolicy": "Delete",
+   "Metadata": {
+    "aws:cdk:path": "DlqMonitorStack/DLQ/Resource"
+   }
+  },
+  "SourceQueue6E809DF0": {
+   "Type": "AWS::SQS::Queue",
+   "Properties": {
+    "QueueName": "my-service-queue",
+    "RedrivePolicy": {
+     "deadLetterTargetArn": {
+      "Fn::GetAtt": [
+       "DLQ581697C4",
+       "Arn"
+      ]
+     },
+     "maxReceiveCount": 3
+    },
+    "VisibilityTimeout": 30
+   },
+   "UpdateReplacePolicy": "Delete",
+   "DeletionPolicy": "Delete",
+   "Metadata": {
+    "aws:cdk:path": "DlqMonitorStack/SourceQueue/Resource"
+   }
+  },
+  "RetryTracking225338F6": {
+   "Type": "AWS::DynamoDB::Table",
+   "Properties": {
+    "AttributeDefinitions": [
+     {
+      "AttributeName": "message_id",
+      "AttributeType": "S"
+     }
+    ],
+    "BillingMode": "PAY_PER_REQUEST",
+    "KeySchema": [
+     {
+      "AttributeName": "message_id",
+      "KeyType": "HASH"
+     }
+    ],
+    "TableName": "dlq-retry-tracking",
+    "TimeToLiveSpecification": {
+     "AttributeName": "ttl",
+     "Enabled": true
+    }
+   },
+   "UpdateReplacePolicy": "Delete",
+   "DeletionPolicy": "Delete",
+   "Metadata": {
+    "aws:cdk:path": "DlqMonitorStack/RetryTracking/Resource"
+   }
+  },
+  "AlertsTopic3414BE91": {
+   "Type": "AWS::SNS::Topic",
+   "Properties": {
+    "DisplayName": "DLQ Monitor Alerts",
+    "TopicName": "dlq-alerts"
+   },
+   "Metadata": {
+    "aws:cdk:path": "DlqMonitorStack/AlertsTopic/Resource"
+   }
+  },
+  "ApiFunctionServiceRole52B9747B": {
+   "Type": "AWS::IAM::Role",
+   "Properties": {
+    "AssumeRolePolicyDocument": {
+     "Statement": [
+      {
+       "Action": "sts:AssumeRole",
+       "Effect": "Allow",
+       "Principal": {
+        "Service": "lambda.amazonaws.com"
+       }
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "ManagedPolicyArns": [
+     {
+      "Fn::Join": [
+       "",
+       [
+        "arn:",
+        {
+         "Ref": "AWS::Partition"
+        },
+        ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+       ]
+      ]
+     }
+    ]
+   },
+   "Metadata": {
+    "aws:cdk:path": "DlqMonitorStack/ApiFunction/ServiceRole/Resource"
+   }
+  },
+  "ApiFunctionServiceRoleDefaultPolicy20A32B8D": {
+   "Type": "AWS::IAM::Policy",
+   "Properties": {
+    "PolicyDocument": {
+     "Statement": [
+      {
+       "Action": [
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueAttributes",
+        "sqs:GetQueueUrl"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::GetAtt": [
+         "DLQ581697C4",
+         "Arn"
+        ]
+       }
+      },
+      {
+       "Action": "sqs:SendMessage",
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::GetAtt": [
+         "SourceQueue6E809DF0",
+         "Arn"
+        ]
+       }
+      },
+      {
+       "Action": "sns:Publish",
+       "Effect": "Allow",
+       "Resource": {
+        "Ref": "AlertsTopic3414BE91"
+       }
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "PolicyName": "ApiFunctionServiceRoleDefaultPolicy20A32B8D",
+    "Roles": [
+     {
+      "Ref": "ApiFunctionServiceRole52B9747B"
+     }
+    ]
+   },
+   "Metadata": {
+    "aws:cdk:path": "DlqMonitorStack/ApiFunction/ServiceRole/DefaultPolicy/Resource"
+   }
+  },
+  "ApiFunctionCE271BD4": {
+   "Type": "AWS::Lambda::Function",
+   "Properties": {
+    "Code": {
+     "S3Bucket": {
+      "Fn::Sub": "cdk-hnb659fds-assets-${AWS::AccountId}-${AWS::Region}"
+     },
+     "S3Key": "40750ec895a77298d3101e71acb87a36fd48b2ec3d2a4dbc98df3ea5a2d4ae39.zip"
+    },
+    "Environment": {
+     "Variables": {
+      "DLQ_URL": {
+       "Ref": "DLQ581697C4"
+      },
+      "SOURCE_QUEUE_URL": {
+       "Ref": "SourceQueue6E809DF0"
+      },
+      "SNS_TOPIC_ARN": {
+       "Ref": "AlertsTopic3414BE91"
+      },
+      "MAX_RETRY_ATTEMPTS": "3",
+      "ALERT_THRESHOLD": "5"
+     }
+    },
+    "FunctionName": "dlq-monitor-api",
+    "Handler": "lambda_handlers.api.handler",
+    "MemorySize": 256,
+    "Role": {
+     "Fn::GetAtt": [
+      "ApiFunctionServiceRole52B9747B",
+      "Arn"
+     ]
+    },
+    "Runtime": "python3.12",
+    "Timeout": 30
+   },
+   "DependsOn": [
+    "ApiFunctionServiceRoleDefaultPolicy20A32B8D",
+    "ApiFunctionServiceRole52B9747B"
+   ],
+   "Metadata": {
+    "aws:cdk:path": "DlqMonitorStack/ApiFunction/Resource",
+    "aws:asset:path": "asset.40750ec895a77298d3101e71acb87a36fd48b2ec3d2a4dbc98df3ea5a2d4ae39",
+    "aws:asset:is-bundled": true,
+    "aws:asset:property": "Code"
+   }
+  },
+  "PollerFunctionServiceRole16A273FE": {
+   "Type": "AWS::IAM::Role",
+   "Properties": {
+    "AssumeRolePolicyDocument": {
+     "Statement": [
+      {
+       "Action": "sts:AssumeRole",
+       "Effect": "Allow",
+       "Principal": {
+        "Service": "lambda.amazonaws.com"
+       }
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "ManagedPolicyArns": [
+     {
+      "Fn::Join": [
+       "",
+       [
+        "arn:",
+        {
+         "Ref": "AWS::Partition"
+        },
+        ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+       ]
+      ]
+     }
+    ]
+   },
+   "Metadata": {
+    "aws:cdk:path": "DlqMonitorStack/PollerFunction/ServiceRole/Resource"
+   }
+  },
+  "PollerFunctionServiceRoleDefaultPolicy37E7680E": {
+   "Type": "AWS::IAM::Policy",
+   "Properties": {
+    "PolicyDocument": {
+     "Statement": [
+      {
+       "Action": [
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueAttributes",
+        "sqs:GetQueueUrl"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::GetAtt": [
+         "DLQ581697C4",
+         "Arn"
+        ]
+       }
+      },
+      {
+       "Action": "sqs:SendMessage",
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::GetAtt": [
+         "SourceQueue6E809DF0",
+         "Arn"
+        ]
+       }
+      },
+      {
+       "Action": "sns:Publish",
+       "Effect": "Allow",
+       "Resource": {
+        "Ref": "AlertsTopic3414BE91"
+       }
+      },
+      {
+       "Action": [
+        "dynamodb:GetItem",
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::GetAtt": [
+         "RetryTracking225338F6",
+         "Arn"
+        ]
+       }
+      },
+      {
+       "Action": "cloudwatch:PutMetricData",
+       "Condition": {
+        "StringEquals": {
+         "cloudwatch:namespace": "DLQMonitor"
+        }
+       },
+       "Effect": "Allow",
+       "Resource": "*"
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "PolicyName": "PollerFunctionServiceRoleDefaultPolicy37E7680E",
+    "Roles": [
+     {
+      "Ref": "PollerFunctionServiceRole16A273FE"
+     }
+    ]
+   },
+   "Metadata": {
+    "aws:cdk:path": "DlqMonitorStack/PollerFunction/ServiceRole/DefaultPolicy/Resource"
+   }
+  },
+  "PollerFunction3245213F": {
+   "Type": "AWS::Lambda::Function",
+   "Properties": {
+    "Code": {
+     "S3Bucket": {
+      "Fn::Sub": "cdk-hnb659fds-assets-${AWS::AccountId}-${AWS::Region}"
+     },
+     "S3Key": "40750ec895a77298d3101e71acb87a36fd48b2ec3d2a4dbc98df3ea5a2d4ae39.zip"
+    },
+    "Environment": {
+     "Variables": {
+      "DLQ_URL": {
+       "Ref": "DLQ581697C4"
+      },
+      "SOURCE_QUEUE_URL": {
+       "Ref": "SourceQueue6E809DF0"
+      },
+      "SNS_TOPIC_ARN": {
+       "Ref": "AlertsTopic3414BE91"
+      },
+      "MAX_RETRY_ATTEMPTS": "3",
+      "ALERT_THRESHOLD": "5",
+      "DYNAMODB_TABLE_NAME": {
+       "Ref": "RetryTracking225338F6"
+      }
+     }
+    },
+    "FunctionName": "dlq-monitor-poller",
+    "Handler": "lambda_handlers.poller.handler",
+    "MemorySize": 256,
+    "Role": {
+     "Fn::GetAtt": [
+      "PollerFunctionServiceRole16A273FE",
+      "Arn"
+     ]
+    },
+    "Runtime": "python3.12",
+    "Timeout": 60
+   },
+   "DependsOn": [
+    "PollerFunctionServiceRoleDefaultPolicy37E7680E",
+    "PollerFunctionServiceRole16A273FE"
+   ],
+   "Metadata": {
+    "aws:cdk:path": "DlqMonitorStack/PollerFunction/Resource",
+    "aws:asset:path": "asset.40750ec895a77298d3101e71acb87a36fd48b2ec3d2a4dbc98df3ea5a2d4ae39",
+    "aws:asset:is-bundled": true,
+    "aws:asset:property": "Code"
+   }
+  },
+  "HttpApiF5A9A8A7": {
+   "Type": "AWS::ApiGatewayV2::Api",
+   "Properties": {
+    "CorsConfiguration": {
+     "AllowHeaders": [
+      "Content-Type",
+      "Authorization"
+     ],
+     "AllowMethods": [
+      "GET",
+      "POST",
+      "DELETE",
+      "OPTIONS"
+     ],
+     "AllowOrigins": [
+      "*"
+     ]
+    },
+    "Name": "dlq-monitor-api",
+    "ProtocolType": "HTTP"
+   },
+   "Metadata": {
+    "aws:cdk:path": "DlqMonitorStack/HttpApi/Resource"
+   }
+  },
+  "HttpApiDefaultStage3EEB07D6": {
+   "Type": "AWS::ApiGatewayV2::Stage",
+   "Properties": {
+    "ApiId": {
+     "Ref": "HttpApiF5A9A8A7"
+    },
+    "AutoDeploy": true,
+    "StageName": "$default"
+   },
+   "Metadata": {
+    "aws:cdk:path": "DlqMonitorStack/HttpApi/DefaultStage/Resource"
+   }
+  },
+  "HttpApiGETproxyApiIntegrationB6CCDDFB": {
+   "Type": "AWS::ApiGatewayV2::Integration",
+   "Properties": {
+    "ApiId": {
+     "Ref": "HttpApiF5A9A8A7"
+    },
+    "IntegrationType": "AWS_PROXY",
+    "IntegrationUri": {
+     "Fn::GetAtt": [
+      "ApiFunctionCE271BD4",
+      "Arn"
+     ]
+    },
+    "PayloadFormatVersion": "2.0"
+   },
+   "Metadata": {
+    "aws:cdk:path": "DlqMonitorStack/HttpApi/GET--{proxy+}/ApiIntegration/Resource"
+   }
+  },
+  "HttpApiGETproxyApiIntegrationPermission0859F8EC": {
+   "Type": "AWS::Lambda::Permission",
+   "Properties": {
+    "Action": "lambda:InvokeFunction",
+    "FunctionName": {
+     "Fn::GetAtt": [
+      "ApiFunctionCE271BD4",
+      "Arn"
+     ]
+    },
+    "Principal": "apigateway.amazonaws.com",
+    "SourceArn": {
+     "Fn::Join": [
+      "",
+      [
+       "arn:",
+       {
+        "Ref": "AWS::Partition"
+       },
+       ":execute-api:",
+       {
+        "Ref": "AWS::Region"
+       },
+       ":",
+       {
+        "Ref": "AWS::AccountId"
+       },
+       ":",
+       {
+        "Ref": "HttpApiF5A9A8A7"
+       },
+       "/*/*/{proxy+}"
+      ]
+     ]
+    }
+   },
+   "Metadata": {
+    "aws:cdk:path": "DlqMonitorStack/HttpApi/GET--{proxy+}/ApiIntegration-Permission"
+   }
+  },
+  "HttpApiGETproxyC12F9FC6": {
+   "Type": "AWS::ApiGatewayV2::Route",
+   "Properties": {
+    "ApiId": {
+     "Ref": "HttpApiF5A9A8A7"
+    },
+    "AuthorizationType": "NONE",
+    "RouteKey": "GET /{proxy+}",
+    "Target": {
+     "Fn::Join": [
+      "",
+      [
+       "integrations/",
+       {
+        "Ref": "HttpApiGETproxyApiIntegrationB6CCDDFB"
+       }
+      ]
+     ]
+    }
+   },
+   "Metadata": {
+    "aws:cdk:path": "DlqMonitorStack/HttpApi/GET--{proxy+}/Resource"
+   }
+  },
+  "HttpApiPOSTproxyApiIntegrationPermissionF19E857A": {
+   "Type": "AWS::Lambda::Permission",
+   "Properties": {
+    "Action": "lambda:InvokeFunction",
+    "FunctionName": {
+     "Fn::GetAtt": [
+      "ApiFunctionCE271BD4",
+      "Arn"
+     ]
+    },
+    "Principal": "apigateway.amazonaws.com",
+    "SourceArn": {
+     "Fn::Join": [
+      "",
+      [
+       "arn:",
+       {
+        "Ref": "AWS::Partition"
+       },
+       ":execute-api:",
+       {
+        "Ref": "AWS::Region"
+       },
+       ":",
+       {
+        "Ref": "AWS::AccountId"
+       },
+       ":",
+       {
+        "Ref": "HttpApiF5A9A8A7"
+       },
+       "/*/*/{proxy+}"
+      ]
+     ]
+    }
+   },
+   "Metadata": {
+    "aws:cdk:path": "DlqMonitorStack/HttpApi/POST--{proxy+}/ApiIntegration-Permission"
+   }
+  },
+  "HttpApiPOSTproxyCBD28088": {
+   "Type": "AWS::ApiGatewayV2::Route",
+   "Properties": {
+    "ApiId": {
+     "Ref": "HttpApiF5A9A8A7"
+    },
+    "AuthorizationType": "NONE",
+    "RouteKey": "POST /{proxy+}",
+    "Target": {
+     "Fn::Join": [
+      "",
+      [
+       "integrations/",
+       {
+        "Ref": "HttpApiGETproxyApiIntegrationB6CCDDFB"
+       }
+      ]
+     ]
+    }
+   },
+   "Metadata": {
+    "aws:cdk:path": "DlqMonitorStack/HttpApi/POST--{proxy+}/Resource"
+   }
+  },
+  "HttpApiDELETEproxyApiIntegrationPermission1DB5BFD9": {
+   "Type": "AWS::Lambda::Permission",
+   "Properties": {
+    "Action": "lambda:InvokeFunction",
+    "FunctionName": {
+     "Fn::GetAtt": [
+      "ApiFunctionCE271BD4",
+      "Arn"
+     ]
+    },
+    "Principal": "apigateway.amazonaws.com",
+    "SourceArn": {
+     "Fn::Join": [
+      "",
+      [
+       "arn:",
+       {
+        "Ref": "AWS::Partition"
+       },
+       ":execute-api:",
+       {
+        "Ref": "AWS::Region"
+       },
+       ":",
+       {
+        "Ref": "AWS::AccountId"
+       },
+       ":",
+       {
+        "Ref": "HttpApiF5A9A8A7"
+       },
+       "/*/*/{proxy+}"
+      ]
+     ]
+    }
+   },
+   "Metadata": {
+    "aws:cdk:path": "DlqMonitorStack/HttpApi/DELETE--{proxy+}/ApiIntegration-Permission"
+   }
+  },
+  "HttpApiDELETEproxyED63FCD8": {
+   "Type": "AWS::ApiGatewayV2::Route",
+   "Properties": {
+    "ApiId": {
+     "Ref": "HttpApiF5A9A8A7"
+    },
+    "AuthorizationType": "NONE",
+    "RouteKey": "DELETE /{proxy+}",
+    "Target": {
+     "Fn::Join": [
+      "",
+      [
+       "integrations/",
+       {
+        "Ref": "HttpApiGETproxyApiIntegrationB6CCDDFB"
+       }
+      ]
+     ]
+    }
+   },
+   "Metadata": {
+    "aws:cdk:path": "DlqMonitorStack/HttpApi/DELETE--{proxy+}/Resource"
+   }
+  },
+  "HttpApiGETApiIntegrationPermissionCE513298": {
+   "Type": "AWS::Lambda::Permission",
+   "Properties": {
+    "Action": "lambda:InvokeFunction",
+    "FunctionName": {
+     "Fn::GetAtt": [
+      "ApiFunctionCE271BD4",
+      "Arn"
+     ]
+    },
+    "Principal": "apigateway.amazonaws.com",
+    "SourceArn": {
+     "Fn::Join": [
+      "",
+      [
+       "arn:",
+       {
+        "Ref": "AWS::Partition"
+       },
+       ":execute-api:",
+       {
+        "Ref": "AWS::Region"
+       },
+       ":",
+       {
+        "Ref": "AWS::AccountId"
+       },
+       ":",
+       {
+        "Ref": "HttpApiF5A9A8A7"
+       },
+       "/*/*/"
+      ]
+     ]
+    }
+   },
+   "Metadata": {
+    "aws:cdk:path": "DlqMonitorStack/HttpApi/GET--/ApiIntegration-Permission"
+   }
+  },
+  "HttpApiGETF1CE5704": {
+   "Type": "AWS::ApiGatewayV2::Route",
+   "Properties": {
+    "ApiId": {
+     "Ref": "HttpApiF5A9A8A7"
+    },
+    "AuthorizationType": "NONE",
+    "RouteKey": "GET /",
+    "Target": {
+     "Fn::Join": [
+      "",
+      [
+       "integrations/",
+       {
+        "Ref": "HttpApiGETproxyApiIntegrationB6CCDDFB"
+       }
+      ]
+     ]
+    }
+   },
+   "Metadata": {
+    "aws:cdk:path": "DlqMonitorStack/HttpApi/GET--/Resource"
+   }
+  },
+  "PollerSchedule9566DF58": {
+   "Type": "AWS::Events::Rule",
+   "Properties": {
+    "Name": "dlq-monitor-poller-schedule",
+    "ScheduleExpression": "rate(1 minute)",
+    "State": "ENABLED",
+    "Targets": [
+     {
+      "Arn": {
+       "Fn::GetAtt": [
+        "PollerFunction3245213F",
+        "Arn"
+       ]
+      },
+      "Id": "Target0"
+     }
+    ]
+   },
+   "Metadata": {
+    "aws:cdk:path": "DlqMonitorStack/PollerSchedule/Resource"
+   }
+  },
+  "PollerScheduleAllowEventRuleDlqMonitorStackPollerFunctionD2B1D92AA493E656": {
+   "Type": "AWS::Lambda::Permission",
+   "Properties": {
+    "Action": "lambda:InvokeFunction",
+    "FunctionName": {
+     "Fn::GetAtt": [
+      "PollerFunction3245213F",
+      "Arn"
+     ]
+    },
+    "Principal": "events.amazonaws.com",
+    "SourceArn": {
+     "Fn::GetAtt": [
+      "PollerSchedule9566DF58",
+      "Arn"
+     ]
+    }
+   },
+   "Metadata": {
+    "aws:cdk:path": "DlqMonitorStack/PollerSchedule/AllowEventRuleDlqMonitorStackPollerFunctionD2B1D92A"
+   }
+  },
+  "MonitorDashboardEA5DE13A": {
+   "Type": "AWS::CloudWatch::Dashboard",
+   "Properties": {
+    "DashboardBody": {
+     "Fn::Join": [
+      "",
+      [
+       "{\"periodOverride\":\"auto\",\"widgets\":[{\"type\":\"metric\",\"width\":8,\"height\":6,\"x\":0,\"y\":0,\"properties\":{\"view\":\"timeSeries\",\"title\":\"Messages Retried\",\"region\":\"",
+       {
+        "Ref": "AWS::Region"
+       },
+       "\",\"metrics\":[[\"DLQMonitor\",\"messages_retried\",{\"stat\":\"Sum\"}]],\"yAxis\":{}}},{\"type\":\"metric\",\"width\":8,\"height\":6,\"x\":8,\"y\":0,\"properties\":{\"view\":\"timeSeries\",\"title\":\"Messages Dead-Lettered\",\"region\":\"",
+       {
+        "Ref": "AWS::Region"
+       },
+       "\",\"metrics\":[[\"DLQMonitor\",\"messages_dead\",{\"stat\":\"Sum\"}]],\"yAxis\":{}}},{\"type\":\"metric\",\"width\":8,\"height\":6,\"x\":16,\"y\":0,\"properties\":{\"view\":\"timeSeries\",\"title\":\"Alerts Sent\",\"region\":\"",
+       {
+        "Ref": "AWS::Region"
+       },
+       "\",\"metrics\":[[\"DLQMonitor\",\"alerts_sent\",{\"stat\":\"Sum\"}]],\"yAxis\":{}}}]}"
+      ]
+     ]
+    },
+    "DashboardName": "DLQMonitor"
+   },
+   "Metadata": {
+    "aws:cdk:path": "DlqMonitorStack/MonitorDashboard/Resource"
+   }
+  },
+  "CDKMetadata": {
+   "Type": "AWS::CDK::Metadata",
+   "Properties": {
+    "Analytics": "v2:deflate64:H4sIAAAAAAAA/11PwU7DMAz9lt2zABsgcdxACE6UsvvkpqYNa5NSO6uqKP9OkgJCnN579rP9vJGbmzt5uYKJ1qo+rTtdSf/GoE4ilo6ePkn6V4cOxf27ySSIejbQ2zo6D1B1uZNJEGSi/WAHrXIxkSA66KsapH90RrG2JrX+8gLHXhNFFYSGXvrSLkszFrbTas6+zOKR7RGIkEnuEkQt906dkPdAKGDQDTBOMJ830j8xD7tBp/EEScbvmrx+IalUWscLezaMzQg/0f7J7AsCz2jidV+675wu/a466+oJWLXSPwC1lYWxTu1fEYIokawbFYocPSXQpkmmF8eD4yCKmVtrLrby6lrerj5I6/XoDOseZbngF+5bGNqzAQAA"
+   },
+   "Metadata": {
+    "aws:cdk:path": "DlqMonitorStack/CDKMetadata/Default"
+   },
+   "Condition": "CDKMetadataAvailable"
+  }
+ },
+ "Outputs": {
+  "ApiUrl": {
+   "Description": "API Gateway endpoint URL",
+   "Value": {
+    "Fn::Join": [
+     "",
+     [
+      "https://",
+      {
+       "Ref": "HttpApiF5A9A8A7"
+      },
+      ".execute-api.",
+      {
+       "Ref": "AWS::Region"
+      },
+      ".",
+      {
+       "Ref": "AWS::URLSuffix"
+      },
+      "/"
+     ]
+    ]
+   }
+  },
+  "DlqUrl": {
+   "Description": "DLQ queue URL",
+   "Value": {
+    "Ref": "DLQ581697C4"
+   }
+  },
+  "SourceQueueUrl": {
+   "Description": "Source queue URL",
+   "Value": {
+    "Ref": "SourceQueue6E809DF0"
+   }
+  },
+  "SnsTopicArn": {
+   "Description": "SNS alerts topic ARN",
+   "Value": {
+    "Ref": "AlertsTopic3414BE91"
+   }
+  },
+  "RetryTableName": {
+   "Description": "DynamoDB retry tracking table",
+   "Value": {
+    "Ref": "RetryTracking225338F6"
+   }
+  },
+  "DashboardUrl": {
+   "Description": "CloudWatch dashboard URL",
+   "Value": {
+    "Fn::Join": [
+     "",
+     [
+      "https://",
+      {
+       "Ref": "AWS::Region"
+      },
+      ".console.aws.amazon.com/cloudwatch/home#dashboards:name=DLQMonitor"
+     ]
+    ]
+   }
+  }
+ },
+ "Conditions": {
+  "CDKMetadataAvailable": {
+   "Fn::Or": [
+    {
+     "Fn::Or": [
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "af-south-1"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "ap-east-1"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "ap-northeast-1"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "ap-northeast-2"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "ap-northeast-3"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "ap-south-1"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "ap-south-2"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "ap-southeast-1"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "ap-southeast-2"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "ap-southeast-3"
+       ]
+      }
+     ]
+    },
+    {
+     "Fn::Or": [
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "ap-southeast-4"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "ca-central-1"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "ca-west-1"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "cn-north-1"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "cn-northwest-1"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "eu-central-1"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "eu-central-2"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "eu-north-1"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "eu-south-1"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "eu-south-2"
+       ]
+      }
+     ]
+    },
+    {
+     "Fn::Or": [
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "eu-west-1"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "eu-west-2"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "eu-west-3"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "il-central-1"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "me-central-1"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "me-south-1"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "sa-east-1"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "us-east-1"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "us-east-2"
+       ]
+      },
+      {
+       "Fn::Equals": [
+        {
+         "Ref": "AWS::Region"
+        },
+        "us-west-1"
+       ]
+      }
+     ]
+    },
+    {
+     "Fn::Equals": [
+      {
+       "Ref": "AWS::Region"
+      },
+      "us-west-2"
+     ]
+    }
+   ]
+  }
+ },
+ "Parameters": {
+  "BootstrapVersion": {
+   "Type": "AWS::SSM::Parameter::Value<String>",
+   "Default": "/cdk-bootstrap/hnb659fds/version",
+   "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]"
+  }
+ },
+ "Rules": {
+  "CheckBootstrapVersion": {
+   "Assertions": [
+    {
+     "Assert": {
+      "Fn::Not": [
+       {
+        "Fn::Contains": [
+         [
+          "1",
+          "2",
+          "3",
+          "4",
+          "5"
+         ],
+         {
+          "Ref": "BootstrapVersion"
+         }
+        ]
+       }
+      ]
+     },
+     "AssertDescription": "CDK bootstrap stack version 6 required. Please run 'cdk bootstrap' with a recent version of the CDK CLI."
+    }
+   ]
+  }
+ }
+}
