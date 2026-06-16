@@ -1,0 +1,39 @@
+version: "3.9"
+
+services:
+  localstack:
+    image: localstack/localstack:3.4
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=sqs,sns
+      - DEBUG=1
+      - PERSISTENCE=0
+    volumes:
+      - "./localstack-init:/etc/localstack/init/ready.d"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  dlq-monitor:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - DLQ_URL=http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/my-service-dlq
+      - SOURCE_QUEUE_URL=http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/my-service-queue
+      - SNS_TOPIC_ARN=arn:aws:sns:us-east-1:000000000000:dlq-alerts
+      - POLL_INTERVAL_SECONDS=30
+      - MAX_RETRY_ATTEMPTS=3
+      - ALERT_THRESHOLD=5
+    depends_on:
+      localstack:
+        condition: service_healthy
+    volumes:
+      - .:/app
