@@ -1,0 +1,6 @@
+infra/cdk.out/
+infra/__pycache__/
+infra/stacks/__pycache__/
+__pycache__/
+*.pyc
+.env
