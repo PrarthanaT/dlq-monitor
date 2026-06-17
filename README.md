@@ -7,7 +7,7 @@
 
 Automated dead-letter queue triage: classifies SQS failures, retries transient errors with exponential backoff, dead-letters permanent failures, and alerts on anomalies.
 
-**[Live Frontend](https://dlq-monitor-frontend.vercel.app)** · **[API Docs](https://be7vs42u6g.execute-api.us-east-1.amazonaws.com/docs)**
+**[Live Demo](https://dlq-monitor-frontend.vercel.app)** · **[API Docs](https://be7vs42u6g.execute-api.us-east-1.amazonaws.com/docs)**
 
 ## Architecture
 
