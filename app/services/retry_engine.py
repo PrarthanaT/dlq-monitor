@@ -29,6 +29,7 @@ class RetryEngine:
         )
         return RetryResult(
             message_id=message.message_id,
+            correlation_id=message.correlation_id,
             success=False,
             attempt=0,
             error=f"Permanent failure: {message.failure_category.value}",
@@ -76,10 +77,21 @@ class RetryEngine:
         try:
             await loop.run_in_executor(None, _send)
             log.info("retry_success", attempt=attempt)
-            return RetryResult(message_id=message.message_id, success=True, attempt=attempt)
+            return RetryResult(
+                message_id=message.message_id,
+                correlation_id=message.correlation_id,
+                success=True,
+                attempt=attempt,
+            )
         except Exception as exc:
             log.error("retry_failed", attempt=attempt, error=str(exc))
-            return RetryResult(message_id=message.message_id, success=False, attempt=attempt, error=str(exc))
+            return RetryResult(
+                message_id=message.message_id,
+                correlation_id=message.correlation_id,
+                success=False,
+                attempt=attempt,
+                error=str(exc),
+            )
 
     async def retry_batch(self, messages: list[DLQMessage]) -> list[RetryResult]:
         tasks = [self.retry_message(msg) for msg in messages]
