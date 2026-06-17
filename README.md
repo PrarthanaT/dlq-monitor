@@ -86,6 +86,30 @@ An SQS Lambda trigger would invoke on every message arrival, which is exactly th
 | Validation Error | PERMANENT | Dead-lettered + tracked in DynamoDB |
 | Poison Pill (5+ receives) | PERMANENT | Dead-lettered immediately + SNS alert |
 
+## Load Testing
+
+Pipeline validated under synthetic load using `scripts/load_test.py`. Results from a 500-message run against the live AWS deployment:
+
+| Metric | Value |
+|---|---|
+| Messages Sent | 500 |
+| Messages Processed | 500 |
+| Retried (transient) | 373 |
+| Dead-Lettered (permanent) | 127 |
+| Processing Errors | 0 |
+| Time Elapsed | 168.7s |
+| Throughput | 3.0 msg/s |
+
+Every message was classified correctly: all transient failures (timeout, dependency, unknown) were retried with backoff, all permanent failures (validation error) were dead-lettered and deleted. The script disables the EventBridge poller schedule for the duration of the test via `try/finally` to prevent the background poller Lambda from consuming messages concurrently and skewing the counts.
+
+```bash
+# Sanity check (10 messages)
+python scripts/load_test.py --dry-run
+
+# Full run
+python scripts/load_test.py --count 500
+```
+
 ## API
 
 | Method | Endpoint | Description |
