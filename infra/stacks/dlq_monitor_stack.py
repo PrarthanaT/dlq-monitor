@@ -139,6 +139,7 @@ class DlqMonitorStack(Stack):
                 actions=[
                     "sqs:ReceiveMessage",
                     "sqs:DeleteMessage",
+                    "sqs:SendMessage",
                     "sqs:GetQueueAttributes",
                     "sqs:GetQueueUrl",
                 ],

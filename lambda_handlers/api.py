@@ -38,6 +38,7 @@ app.add_middleware(
 app.include_router(router)
 
 app.state.settings = settings
+app.state.sqs_client = sqs_client
 app.state.poller = poller
 app.state.retry_engine = retry_engine
 app.state.alerter = alerter

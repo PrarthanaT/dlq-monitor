@@ -1,10 +1,19 @@
+import asyncio
+import json
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel
 
-from app.models import DLQMessage, DLQStats, RetryResult
+from app.models import DLQMessage, DLQStats, FailureCategory, RetryResult
 
 router = APIRouter()
+
+
+class InjectRequest(BaseModel):
+    body: str
+    error_type: str
 
 
 def get_poller(request: Request):
@@ -17,6 +26,14 @@ def get_retry_engine(request: Request):
 
 def get_stats(request: Request) -> DLQStats:
     return request.app.state.stats
+
+
+def get_settings(request: Request):
+    return request.app.state.settings
+
+
+def get_sqs_client(request: Request):
+    return request.app.state.sqs_client
 
 
 @router.get("/health")
@@ -87,3 +104,80 @@ async def delete_message(
 @router.post("/poll", response_model=list[DLQMessage])
 async def trigger_poll(poller=Depends(get_poller)) -> list[DLQMessage]:
     return await poller.poll_once()
+
+
+ERROR_TYPE_MAP = {
+    "Connection Timeout": ("timeout", FailureCategory.TIMEOUT),
+    "Validation Error": ("validation error: invalid payload", FailureCategory.VALIDATION_ERROR),
+    "Dependency Failure": ("connection refused: service unavailable", FailureCategory.DEPENDENCY_FAILURE),
+    "Unknown": ("unexpected error occurred", FailureCategory.UNKNOWN),
+}
+
+
+@router.post("/inject")
+async def inject_failure(
+    req: InjectRequest,
+    settings=Depends(get_settings),
+    sqs_client=Depends(get_sqs_client),
+    poller=Depends(get_poller),
+    retry_engine=Depends(get_retry_engine),
+    stats: DLQStats = Depends(get_stats),
+):
+    error_snippet, category = ERROR_TYPE_MAP.get(
+        req.error_type, ("unexpected error occurred", FailureCategory.UNKNOWN)
+    )
+
+    try:
+        payload = json.loads(req.body)
+    except (json.JSONDecodeError, TypeError):
+        payload = {"raw": req.body}
+    payload["error"] = error_snippet
+
+    loop = asyncio.get_event_loop()
+    send_resp = await loop.run_in_executor(
+        None,
+        lambda: sqs_client.send_message(
+            QueueUrl=settings.DLQ_URL,
+            MessageBody=json.dumps(payload),
+        ),
+    )
+    injected_id = send_resp["MessageId"]
+
+    await asyncio.sleep(1)
+
+    messages = await poller.poll_once()
+
+    action = "IGNORED"
+    classification = category.value
+    matched_msg = None
+    for msg in messages:
+        if msg.message_id == injected_id:
+            matched_msg = msg
+            classification = msg.failure_category.value
+            break
+
+    if not matched_msg and messages:
+        matched_msg = messages[0]
+        classification = matched_msg.failure_category.value
+
+    if matched_msg:
+        results = await retry_engine.retry_batch([matched_msg])
+        result = results[0]
+        if result.success:
+            await poller.delete_message(matched_msg)
+            stats.messages_retried += 1
+            action = "RETRIED"
+        elif not poller._classifier.is_retryable(matched_msg.failure_category):
+            await poller.delete_message(matched_msg)
+            stats.messages_dead += 1
+            action = "DEAD"
+        else:
+            action = "RETRY_FAILED"
+
+    return {
+        "message_id": injected_id,
+        "error_type": req.error_type,
+        "classification": classification,
+        "action": action,
+        "body": payload,
+    }
