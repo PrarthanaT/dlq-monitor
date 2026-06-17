@@ -1,9 +1,7 @@
-import json
 import uuid
 from unittest.mock import MagicMock
 
 import pytest
-import structlog
 from structlog.testing import capture_logs
 
 from app.models import DLQMessage, FailureCategory
@@ -145,7 +143,7 @@ class TestAlerterCorrelationId:
 
         await alerter.alert_poison_pill(msg)
 
-        msgs = sns_client.list_subscriptions_by_topic(TopicArn=sns_topic)
+        sns_client.list_subscriptions_by_topic(TopicArn=sns_topic)
         # Verify the SNS publish included the correlation_id by checking the
         # alerter set it on the payload (integration tested via the log)
 
