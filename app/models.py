@@ -37,6 +37,7 @@ class DLQMessage(BaseModel):
 
 class RetryResult(BaseModel):
     message_id: str
+    correlation_id: str
     success: bool
     attempt: int
     error: str | None = None
@@ -58,4 +59,5 @@ class AlertPayload(BaseModel):
     message: str
     queue_url: str
     depth: int
+    correlation_id: str | None = None
     timestamp: datetime = Field(default_factory=datetime.utcnow)

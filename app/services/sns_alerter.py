@@ -18,6 +18,8 @@ class SNSAlerter:
     async def send_alert(
         self, payload: AlertPayload, correlation_id: str | None = None,
     ) -> bool:
+        if correlation_id:
+            payload.correlation_id = correlation_id
         log = logger.bind(correlation_id=correlation_id) if correlation_id else logger
         subject = f"[DLQ-MONITOR] {payload.severity}: {payload.topic}"
         message_body = json.dumps(payload.model_dump(mode="json"), indent=2, default=str)
