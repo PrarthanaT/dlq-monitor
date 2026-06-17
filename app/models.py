@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import datetime
 from enum import Enum
 from typing import Any, Literal
@@ -20,6 +21,7 @@ class DLQMessage(BaseModel):
     message_id: str
     receipt_handle: str
     body: str
+    correlation_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     attributes: dict[str, Any] = Field(default_factory=dict)
     received_at: datetime = Field(default_factory=datetime.utcnow)
     retry_count: int = 0

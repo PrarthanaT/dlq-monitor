@@ -127,6 +127,23 @@ All configuration via environment variables:
 | `ALERT_THRESHOLD` | `5` | Queue depth that triggers an alert |
 | `AWS_ENDPOINT_URL` | — | Set for LocalStack; omit for real AWS |
 
+## Design Decisions
+
+**Why CDK over SAM?**
+CDK lets us define infrastructure in Python — the same language as the application — so the stack is a single codebase with shared constants, no YAML drift, and full IDE support. It also gives us L2 constructs (e.g. `DeadLetterQueue`, `HttpApi`) that handle IAM wiring and defaults that SAM requires you to spell out manually.
+
+**Why DynamoDB for retry tracking vs SQS message attributes?**
+SQS message attributes are lost when a message is deleted, so there's no durable record of what happened. DynamoDB gives us a queryable audit trail per message — retry count, timestamps, failure category, final status — that survives the message lifecycle and supports dashboarding, debugging, and compliance.
+
+**Why FastAPI over plain Lambda handlers?**
+FastAPI gives us automatic request validation, OpenAPI docs at `/docs`, dependency injection, and CORS middleware — all of which we'd have to hand-roll with raw Lambda handlers. Mangum adapts it to Lambda with zero overhead, so we get the full framework without paying for a long-running server.
+
+**Why rules-based classifier vs ML?**
+The failure taxonomy is small and well-defined (timeouts, validation errors, dependency failures, poison pills). A rules-based classifier is deterministic, testable with simple unit tests, and has zero cold-start cost. An ML model would add training infrastructure, inference latency, and a data pipeline — unjustified complexity for a classification problem with ~5 categories and clear keyword signals.
+
+**Why EventBridge polling vs SQS triggers?**
+SQS Lambda triggers would re-process DLQ messages immediately, which defeats the purpose of a dead-letter queue — the downstream service likely hasn't recovered yet. A 1-minute EventBridge schedule gives transient failures time to resolve, lets us batch messages for efficient processing, and gives us explicit control over retry timing and backoff without fighting the SQS trigger's own retry behavior.
+
 ## License
 
 MIT

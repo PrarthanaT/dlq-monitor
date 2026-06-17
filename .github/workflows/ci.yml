@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio pytest-cov "moto[all]" flake8
+
+      - name: Lint with flake8
+        run: flake8 app/ lambda_handlers/ tests/ --max-line-length 120 --count --show-source --statistics
+
+      - name: Run tests with coverage
+        run: |
+          pytest tests/ -v \
+            --cov=app.services.classifier \
+            --cov=app.services.retry_engine \
+            --cov=app.services.retry_tracker \
+            --cov=app.models \
+            --cov-report=term-missing \
+            --cov-fail-under=80

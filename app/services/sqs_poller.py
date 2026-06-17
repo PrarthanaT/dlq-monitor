@@ -81,6 +81,11 @@ class SQSPoller:
                 attributes=raw.get("Attributes", {}),
                 raw=raw,
             )
+            log = logger.bind(
+                correlation_id=msg.correlation_id,
+                message_id=msg.message_id,
+            )
+            log.info("message_received")
             msg.failure_category = self._classifier.classify(msg)
             self._stats.messages_processed += 1
 
@@ -89,15 +94,19 @@ class SQSPoller:
                 self._stats.alerts_sent += 1
 
             messages.append(msg)
-            logger.info(
+            log.info(
                 "message_classified",
-                message_id=msg.message_id,
                 category=msg.failure_category,
             )
 
         return messages
 
     async def delete_message(self, message: DLQMessage) -> None:
+        log = logger.bind(
+            correlation_id=message.correlation_id,
+            message_id=message.message_id,
+        )
+
         def _delete() -> None:
             self._sqs.delete_message(
                 QueueUrl=self._settings.DLQ_URL,
@@ -107,9 +116,9 @@ class SQSPoller:
         loop = asyncio.get_event_loop()
         try:
             await loop.run_in_executor(None, _delete)
-            logger.info("message_deleted", message_id=message.message_id)
+            log.info("message_deleted")
         except Exception as exc:
-            logger.error("delete_failed", message_id=message.message_id, error=str(exc))
+            log.error("delete_failed", error=str(exc))
 
     async def start_polling(self) -> None:
         self._running = True

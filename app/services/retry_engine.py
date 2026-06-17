@@ -1,5 +1,4 @@
 import asyncio
-import json
 from typing import Any
 
 import structlog
@@ -19,9 +18,12 @@ class RetryEngine:
         self._classifier = classifier
 
     def _handle_permanent_failure(self, message: DLQMessage) -> RetryResult:
-        logger.error(
-            "permanent_failure_dead_lettered",
+        log = logger.bind(
+            correlation_id=message.correlation_id,
             message_id=message.message_id,
+        )
+        log.error(
+            "permanent_failure_dead_lettered",
             category=message.failure_category,
             body_preview=message.body[:200],
         )
@@ -36,6 +38,10 @@ class RetryEngine:
         if not self._classifier.is_retryable(message.failure_category):
             return self._handle_permanent_failure(message)
 
+        log = logger.bind(
+            correlation_id=message.correlation_id,
+            message_id=message.message_id,
+        )
         attempt = 0
 
         @retry(
@@ -69,10 +75,10 @@ class RetryEngine:
         loop = asyncio.get_event_loop()
         try:
             await loop.run_in_executor(None, _send)
-            logger.info("retry_success", message_id=message.message_id, attempt=attempt)
+            log.info("retry_success", attempt=attempt)
             return RetryResult(message_id=message.message_id, success=True, attempt=attempt)
         except Exception as exc:
-            logger.error("retry_failed", message_id=message.message_id, attempt=attempt, error=str(exc))
+            log.error("retry_failed", attempt=attempt, error=str(exc))
             return RetryResult(message_id=message.message_id, success=False, attempt=attempt, error=str(exc))
 
     async def retry_batch(self, messages: list[DLQMessage]) -> list[RetryResult]:
