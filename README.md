@@ -40,6 +40,23 @@ Automated dead-letter queue triage: classifies SQS failures, retries transient e
 └────────────────────┘
 ```
 
+## Design Decisions
+
+**Why CDK over SAM?**
+SAM is template-driven YAML, which means your infrastructure definition and your application code live in different languages with different toolchains. CDK lets us write the stack in Python — the same language as the Lambda handlers — so constants like queue names and table names are shared references, not copy-pasted strings that drift. The L2 constructs (`DeadLetterQueue`, `HttpApi`) also handle the IAM policy wiring that SAM makes you spell out by hand, which matters when you have two Lambdas with different least-privilege policies talking to five services.
+
+**Why DynamoDB for retry tracking vs SQS message attributes?**
+SQS message attributes ride with the message and vanish when it's deleted — there's no way to query "show me everything that failed in the last hour" or build a dashboard over historical retry behavior. DynamoDB gives us a durable, queryable record per message (retry count, timestamps, failure category, terminal status) that outlives the SQS message lifecycle. The tradeoff is an extra AWS service to manage, but with on-demand billing and TTL-based cleanup, the operational cost is near zero for our volume.
+
+**Why FastAPI over plain Lambda handlers?**
+Raw Lambda handlers mean hand-rolling request validation, CORS, error serialization, and API documentation for every endpoint. FastAPI gives us all of that for free — including OpenAPI docs at `/docs` that double as a testing UI — and Mangum adapts the ASGI app to Lambda's event format with no measurable latency overhead. The tradeoff is a slightly larger deployment package (~2MB), but we gain the ability to run the same app locally with `uvicorn` without any Lambda emulation, which makes the local dev loop significantly faster.
+
+**Why rules-based classifier vs ML?**
+The failure taxonomy has five categories with unambiguous keyword signals: "timeout," "connection refused," HTTP 4xx codes, receive-count thresholds. A rules-based classifier is deterministic, fully unit-testable, and adds zero cold-start latency. ML would require a labeled training set we don't have, a model serving layer, and ongoing retraining — infrastructure that only pays off when the classification boundary is fuzzy. If the taxonomy grows beyond ~10 categories or we start seeing ambiguous failures, that's when ML earns its complexity.
+
+**Why EventBridge polling vs SQS Lambda trigger?**
+An SQS Lambda trigger would invoke on every message arrival, which is exactly the wrong behavior for a DLQ — the downstream service just failed, and immediate reprocessing will almost certainly fail again. The 1-minute EventBridge schedule introduces deliberate delay, giving transient issues time to resolve before we attempt retries with exponential backoff. It also means we control the batch size and retry cadence explicitly, instead of fighting the SQS trigger's own visibility-timeout-based retry loop that would compete with our backoff logic.
+
 ## Tech Stack
 
 | Backend | Frontend |
@@ -126,23 +143,6 @@ All configuration via environment variables:
 | `MAX_RETRY_ATTEMPTS` | `3` | Max retries per message |
 | `ALERT_THRESHOLD` | `5` | Queue depth that triggers an alert |
 | `AWS_ENDPOINT_URL` | — | Set for LocalStack; omit for real AWS |
-
-## Design Decisions
-
-**Why CDK over SAM?**
-CDK lets us define infrastructure in Python — the same language as the application — so the stack is a single codebase with shared constants, no YAML drift, and full IDE support. It also gives us L2 constructs (e.g. `DeadLetterQueue`, `HttpApi`) that handle IAM wiring and defaults that SAM requires you to spell out manually.
-
-**Why DynamoDB for retry tracking vs SQS message attributes?**
-SQS message attributes are lost when a message is deleted, so there's no durable record of what happened. DynamoDB gives us a queryable audit trail per message — retry count, timestamps, failure category, final status — that survives the message lifecycle and supports dashboarding, debugging, and compliance.
-
-**Why FastAPI over plain Lambda handlers?**
-FastAPI gives us automatic request validation, OpenAPI docs at `/docs`, dependency injection, and CORS middleware — all of which we'd have to hand-roll with raw Lambda handlers. Mangum adapts it to Lambda with zero overhead, so we get the full framework without paying for a long-running server.
-
-**Why rules-based classifier vs ML?**
-The failure taxonomy is small and well-defined (timeouts, validation errors, dependency failures, poison pills). A rules-based classifier is deterministic, testable with simple unit tests, and has zero cold-start cost. An ML model would add training infrastructure, inference latency, and a data pipeline — unjustified complexity for a classification problem with ~5 categories and clear keyword signals.
-
-**Why EventBridge polling vs SQS triggers?**
-SQS Lambda triggers would re-process DLQ messages immediately, which defeats the purpose of a dead-letter queue — the downstream service likely hasn't recovered yet. A 1-minute EventBridge schedule gives transient failures time to resolve, lets us batch messages for efficient processing, and gives us explicit control over retry timing and backoff without fighting the SQS trigger's own retry behavior.
 
 ## License
 
