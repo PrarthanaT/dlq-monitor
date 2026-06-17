@@ -1,5 +1,10 @@
 # DLQ Monitor
 
+![Tests](https://img.shields.io/badge/tests-75%20passing-brightgreen)
+![Coverage](https://img.shields.io/badge/coverage-97%25-brightgreen)
+![Python](https://img.shields.io/badge/python-3.12-blue)
+![AWS](https://img.shields.io/badge/AWS-CDK%20deployed-orange)
+
 Automated dead-letter queue triage: classifies SQS failures, retries transient errors with exponential backoff, dead-letters permanent failures, and alerts on anomalies.
 
 **[Live Frontend](https://dlq-monitor-frontend.vercel.app)** · **[API Docs](https://be7vs42u6g.execute-api.us-east-1.amazonaws.com/docs)**
