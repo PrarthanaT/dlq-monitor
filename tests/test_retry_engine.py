@@ -1,10 +1,8 @@
-import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-from app.config import Settings
-from app.models import DLQMessage, FailureCategory, RetryResult
+from app.models import DLQMessage, FailureCategory
 from app.services.classifier import FailureClassifier
 from app.services.retry_engine import RetryEngine
 

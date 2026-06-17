@@ -1,6 +1,5 @@
 import asyncio
 import json
-from datetime import datetime
 from typing import Any
 
 import structlog
@@ -16,7 +15,10 @@ class SNSAlerter:
         self._settings = settings
         self._sns = sns_client
 
-    async def send_alert(self, payload: AlertPayload) -> bool:
+    async def send_alert(
+        self, payload: AlertPayload, correlation_id: str | None = None,
+    ) -> bool:
+        log = logger.bind(correlation_id=correlation_id) if correlation_id else logger
         subject = f"[DLQ-MONITOR] {payload.severity}: {payload.topic}"
         message_body = json.dumps(payload.model_dump(mode="json"), indent=2, default=str)
 
@@ -30,13 +32,20 @@ class SNSAlerter:
         loop = asyncio.get_event_loop()
         try:
             response = await loop.run_in_executor(None, _publish)
-            logger.info("alert_sent", message_id=response.get("MessageId"), severity=payload.severity, topic=payload.topic)
+            log.info(
+                "alert_sent",
+                sns_message_id=response.get("MessageId"),
+                severity=payload.severity,
+                topic=payload.topic,
+            )
             return True
         except Exception as exc:
-            logger.error("alert_failed", error=str(exc), topic=payload.topic)
+            log.error("alert_failed", error=str(exc), topic=payload.topic)
             return False
 
-    async def alert_high_depth(self, queue_url: str, depth: int) -> bool:
+    async def alert_high_depth(
+        self, queue_url: str, depth: int, correlation_id: str | None = None,
+    ) -> bool:
         if depth > 50:
             severity = "CRITICAL"
         elif depth > 20:
@@ -53,7 +62,7 @@ class SNSAlerter:
             queue_url=queue_url,
             depth=depth,
         )
-        return await self.send_alert(payload)
+        return await self.send_alert(payload, correlation_id=correlation_id)
 
     async def alert_poison_pill(self, message: DLQMessage) -> bool:
         payload = AlertPayload(
@@ -66,4 +75,6 @@ class SNSAlerter:
             queue_url=self._settings.DLQ_URL,
             depth=0,
         )
-        return await self.send_alert(payload)
+        return await self.send_alert(
+            payload, correlation_id=message.correlation_id,
+        )
