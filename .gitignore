@@ -4,3 +4,4 @@ infra/stacks/__pycache__/
 __pycache__/
 *.pyc
 .env
+.coverage
